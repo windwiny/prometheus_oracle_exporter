@@ -597,18 +597,18 @@ func (e *Exporter) ScrapeTablespace(conn *Config) {
 	{
 		if conn.db != nil {
 			rows, err = conn.db.QueryContext(e.gctx, `WITH
-                                   getsize AS (SELECT tablespace_name, max(autoextensible) autoextensible, SUM(bytes) tsize
+                                   getsize AS (SELECT tablespace_name, max(autoextensible) autoextensible, SUM(case autoextensible when 'YES' then maxbytes else bytes end) tsize, sum(user_bytes) tused
                                                FROM dba_data_files GROUP BY tablespace_name),
                                    getfree as (SELECT tablespace_name, contents, SUM(blocks*block_size) tfree
                                                FROM DBA_LMT_FREE_SPACE a, v$tablespace b, dba_tablespaces c
                                                WHERE a.TABLESPACE_ID= b.ts# and b.name=c.tablespace_name
                                                GROUP BY tablespace_name,contents)
-                                 SELECT a.tablespace_name, b.contents, a.tsize,  b.tfree, a.autoextensible autoextend
+                                 SELECT a.tablespace_name, b.contents, a.tsize,  a.tsize-a.tused+b.tfree tfree, a.autoextensible autoextend
                                  FROM GETSIZE a, GETFREE b
                                  WHERE a.tablespace_name = b.tablespace_name
                                  UNION
-                                 SELECT tablespace_name, 'TEMPORARY', sum(tablespace_size), sum(free_space), 'NO'
-                                 FROM dba_temp_free_space
+                                 SELECT tablespace_name, 'TEMPORARY', sum( case autoextensible when 'YES' then maxbytes else bytes end ) , sum( case autoextensible when 'YES' then maxbytes else bytes end ) - sum(user_bytes) , max(autoextensible)
+                                 FROM dba_temp_files
                                  GROUP BY tablespace_name`)
 			if err != nil {
 				return
