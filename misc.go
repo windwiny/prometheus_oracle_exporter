@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	_ "github.com/sijms/go-ora/v2"
@@ -40,6 +41,7 @@ type Configs struct {
 }
 
 var (
+	cfgLok sync.Mutex
 	config Configs
 	pwd    string
 )
@@ -71,7 +73,9 @@ func loadConfig() bool {
 		log.Fatalf("error: %v", err)
 		return false
 	} else {
+		cfgLok.Lock()
 		err := yaml.Unmarshal(content, &config)
+		cfgLok.Unlock()
 		if err != nil {
 			log.Fatalf("error: %v", err)
 			return false
