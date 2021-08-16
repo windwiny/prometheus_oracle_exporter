@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	_ "github.com/mattn/go-oci8"
-	"github.com/prometheus/common/log"
+	_ "github.com/sijms/go-ora/v2"
+	log "github.com/sirupsen/logrus"
 	"gopkg.in/yaml.v2"
 )
 

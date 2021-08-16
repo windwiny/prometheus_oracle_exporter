@@ -8,10 +8,10 @@ import (
 	"strconv"
 	"time"
 
-	_ "github.com/mattn/go-oci8"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	"github.com/prometheus/common/log"
+	_ "github.com/sijms/go-ora/v2"
+	log "github.com/sirupsen/logrus"
 )
 
 // Metric name parts.
@@ -898,7 +898,7 @@ func (e *Exporter) Connect() {
 			config.Cfgs[i].db = nil
 		}
 		if len(conf.Connection) > 0 {
-			config.Cfgs[i].db, err = sql.Open("oci8", conf.Connection)
+			config.Cfgs[i].db, err = sql.Open("oracle", conf.Connection)
 			if err == nil {
 				err = config.Cfgs[i].db.QueryRow("select db_unique_name,instance_name from v$database,v$instance").Scan(&dbname, &inname)
 				if err == nil {
