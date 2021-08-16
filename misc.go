@@ -84,22 +84,6 @@ func loadConfig() bool {
 	}
 }
 
-func ReadAccess() {
-	var file = pwd + "/" + *accessFile
-	content, err := ioutil.ReadFile(file)
-	if err == nil {
-		err := yaml.Unmarshal(content, &lastlog)
-		if err != nil {
-			log.Fatalf("error1: %v", err)
-		}
-	}
-}
-
-func WriteAccess() {
-	content, _ := yaml.Marshal(&lastlog)
-	ioutil.WriteFile(pwd+"/"+*accessFile, content, 0644)
-}
-
 func WriteLog(message string) {
 	fh, err := os.OpenFile(pwd+"/"+*logFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err == nil {
