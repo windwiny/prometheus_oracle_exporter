@@ -227,8 +227,9 @@ func NewExporter() *Exporter {
 		custom: make(map[string]*prometheus.GaugeVec),
 		used_times: prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
-				Name: "poe_used_times",
-				Help: "this prometheus oracle exporter used time",
+				Namespace: namespace,
+				Name:      "collect_used_times",
+				Help:      "this prometheus oracle exporter used time",
 			},
 			[]string{"ipport", "svname", "column"},
 		),
@@ -282,6 +283,7 @@ func (e *Exporter) ScrapeCustomQueries(conn *Config) {
 				defer rows.Close()
 				var rownum int = 1
 
+			QueryLoop:
 				for rows.Next() {
 					for i := range cols {
 						vals[i] = &vals[i]
@@ -304,6 +306,7 @@ func (e *Exporter) ScrapeCustomQueries(conn *Config) {
 
 						if metricColumnIndex == -1 {
 							//log.Infoln("Metric column '" + metric + "' not found")
+							// missing Metric can skip this metric
 							continue MetricLoop
 						}
 
@@ -313,7 +316,7 @@ func (e *Exporter) ScrapeCustomQueries(conn *Config) {
 							promLabels["dbinstance"] = conn.Instance
 							promLabels["metric"] = metric
 							promLabels["rownum"] = strconv.Itoa(rownum)
-						LebelLoop:
+
 							for _, label := range query.Labels {
 								labelColumnIndex := -1
 								for i, col := range cols {
@@ -324,8 +327,9 @@ func (e *Exporter) ScrapeCustomQueries(conn *Config) {
 								}
 
 								if labelColumnIndex == -1 {
-									//log.Infoln("Label column not found")
-									break LebelLoop
+									// missing Label skip this query
+									log.Warnf(" %s Label %s not found", query.Name, label)
+									break QueryLoop
 								}
 
 								if a, ok := vals[labelColumnIndex].(string); ok {
@@ -337,6 +341,9 @@ func (e *Exporter) ScrapeCustomQueries(conn *Config) {
 									} else {
 										promLabels[cleanName(label)] = strconv.FormatFloat(b, 'e', -1, 64)
 									}
+								} else {
+									// catch other type
+									promLabels[cleanName(label)] = fmt.Sprintf("%v", b)
 								}
 							}
 							e.custom[query.Name].With(promLabels).Set(metricValue)
