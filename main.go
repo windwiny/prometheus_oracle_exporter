@@ -1244,6 +1244,15 @@ func main() {
 		log.Infoln("  /    show index")
 		http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) { w.Write(landingPage) })
 
+		log.Infoln("  /showConfig")
+		http.HandleFunc("/showConfig", func(w http.ResponseWriter, r *http.Request) {
+			{
+				w.Header().Add("Type", "application/json")
+				bts, _ := json.MarshalIndent(config, "", "\t")
+				w.Write([]byte(bts))
+			}
+		})
+
 		log.Infoln("  /reloadConfig")
 		http.HandleFunc("/reloadConfig", func(w http.ResponseWriter, r *http.Request) {
 			reload := loadConfig()
@@ -1251,7 +1260,7 @@ func main() {
 			if reload {
 				addCustomsql(exporter)
 				w.Header().Add("Type", "application/json")
-				bts, _ := json.Marshal(config)
+				bts, _ := json.MarshalIndent(config, "", "\t")
 				w.Write([]byte(bts))
 			} else {
 				w.Write([]byte(fmt.Sprintf(" loadConfig: %v", reload)))
