@@ -963,8 +963,11 @@ func (e *Exporter) Connect() chan *Config {
 			defer func() {
 				defer func() {
 					if e := recover(); e != nil {
-						// skip, openedConn is closed
-						log.Warnln("connect timeout ", conf.Connection)
+						// skip, openedConn is closed. Close the sqldb
+						log.Warnln("openedConn<- , connect timeout. ", conf.db != nil, conf.Connection)
+						if conf.db != nil {
+							conf.db.Close()
+						}
 					}
 				}()
 				openedConn <- &conf
@@ -973,12 +976,13 @@ func (e *Exporter) Connect() chan *Config {
 			if len(conf.Connection) > 0 {
 				db, err := sql.Open("oracle", conf.Connection)
 				if err == nil {
-					err = db.PingContext(e.gctx)
+					conf.db = db
+					err = conf.db.PingContext(e.gctx)
 					if err != nil {
-						db.Close()
+						conf.db.Close()
+						conf.db = nil
 						return
 					}
-					conf.db = db
 
 					var dbname, inname string
 					err = conf.db.QueryRowContext(e.gctx, "select db_unique_name,instance_name from v$database,v$instance").Scan(&dbname, &inname)
@@ -1042,7 +1046,12 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 	defer cancel()
 
 	openedConn := e.Connect()
-	defer close(openedConn)
+	openedConn_closed := false
+	defer func() {
+		if !openedConn_closed {
+			close(openedConn)
+		}
+	}()
 
 	ii := cap(openedConn)
 	var wg sync.WaitGroup
@@ -1052,11 +1061,16 @@ ForLoop:
 		t0 := time.Now()
 		var conn1 *Config
 		select {
-		case conn1 = <-openedConn:
-
+		case con, ok := <-openedConn:
+			if !ok {
+				break ForLoop
+			}
+			conn1 = con
 		case <-ctx.Done():
 			// sql.connect timeout
 			// sql.DB .PingContext  may not work good. skip them
+			close(openedConn)
+			openedConn_closed = true
 			log.Warnf("connect timeout  %d of %d", ii-i, ii)
 			break ForLoop
 		}
