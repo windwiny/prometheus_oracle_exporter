@@ -9,6 +9,8 @@ import (
 	"net"
 	"net/http"
 	_ "net/http/pprof"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -950,42 +952,82 @@ func (e *Exporter) resetAllMetrics() {
 }
 
 // Connect the DBs and gather Databasename and Instancename
+// first time or connect breaked , will on next 2 time reconnect
 func (e *Exporter) Connect() chan *Config {
+	backConnStep1 := make(chan int)
+	go e.backConnect(backConnStep1, backConnStepAll)
+	<-backConnStep1
+
 	cfgLok.Lock()
 	defer cfgLok.Unlock()
 
-	e.resetAllMetrics()
-
 	openedConn := make(chan *Config, len(config.Cfgs))
-	for _, conf := range config.Cfgs {
-		go func(conf Config) {
+	for i := range config.Cfgs {
+		if config.Cfgs[i].db != nil {
+			openedConn <- &config.Cfgs[i]
+			continue
+		}
+	}
+
+	// wait a second, or all connect active finished
+	//  just end all connected, close chan
+	timeout, cancel := context.WithTimeout(context.Background(), time.Duration(3)*time.Second)
+	defer cancel()
+	select {
+	case <-backConnStep1:
+	case <-timeout.Done():
+	}
+	close(openedConn)
+	return openedConn
+}
+
+func (e *Exporter) backConnect(connStep1 chan<- int, connStepAll chan int) {
+	// skip if already run this
+	select {
+	case connStepAll <- 1:
+	default:
+		close(connStep1)
+		return
+	}
+	defer func() {
+		close(connStep1)
+		<-connStepAll
+	}()
+
+	var wg sync.WaitGroup
+	cfgLok.Lock()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(2)*time.Second)
+	defer cancel()
+	for i := range config.Cfgs {
+		if config.Cfgs[i].db != nil {
+			var x int
+			err := config.Cfgs[i].db.QueryRowContext(ctx, "select 1 as X from dual").Scan(&x)
+			if err == nil {
+				continue
+			}
+			// db not null, and  query no error, continue
+			// else reconnect
+		}
+
+		wg.Add(1)
+		go func(conf *Config) {
 			conf.db = nil
 			defer func() {
-				defer func() {
-					if e := recover(); e != nil {
-						// skip, openedConn is closed. Close the sqldb
-						log.Warnln("openedConn<- , connect timeout. ", conf.db != nil, conf.Connection)
-						if conf.db != nil {
-							conf.db.Close()
-						}
-					}
-				}()
-				openedConn <- &conf
+				wg.Done()
+				log.Infoln("connect to", conf.Connection, " status:", conf.db != nil)
 			}()
 
 			if len(conf.Connection) > 0 {
 				db, err := sql.Open("oracle", conf.Connection)
 				if err == nil {
-					conf.db = db
-					err = conf.db.PingContext(e.gctx)
+					err = db.Ping()
 					if err != nil {
-						conf.db.Close()
-						conf.db = nil
 						return
 					}
+					conf.db = db
 
 					var dbname, inname string
-					err = conf.db.QueryRowContext(e.gctx, "select db_unique_name,instance_name from v$database,v$instance").Scan(&dbname, &inname)
+					err = conf.db.QueryRow("select db_unique_name,instance_name from v$database,v$instance").Scan(&dbname, &inname)
 					if err == nil {
 						if (len(conf.Database) == 0) || (len(conf.Instance) == 0) {
 							conf.Database = dbname
@@ -994,6 +1036,7 @@ func (e *Exporter) Connect() chan *Config {
 						e.up.WithLabelValues(conf.Database, conf.Instance).Set(1)
 					} else {
 						conf.db.Close()
+						conf.db = nil
 						e.up.WithLabelValues(conf.Database, conf.Instance).Set(0)
 						log.Errorln("Error connecting to database:", err)
 						//log.Infoln("Connect OK, Inital query failed: ", conf.Connection)
@@ -1003,10 +1046,12 @@ func (e *Exporter) Connect() chan *Config {
 				//log.Infoln("Dummy Connection: ", conf.Database)
 				e.up.WithLabelValues(conf.Database, conf.Instance).Set(0)
 			}
-		}(conf)
+		}(&config.Cfgs[i])
 	}
+	cfgLok.Unlock()
+	connStep1 <- 1
 
-	return openedConn
+	wg.Wait()
 }
 
 func splitConnStr(str string) (string, string) {
@@ -1027,8 +1072,27 @@ func splitConnStr(str string) (string, string) {
 	return ipport, svname
 }
 
+func CloseConnection(oldconfig Configs) {
+	for _, v := range oldconfig.Cfgs {
+		go func(conf Config) {
+			defer func() {
+				if e := recover(); e != nil {
+					log.Warnln(" close connect ", e)
+				}
+			}()
+
+			if conf.db != nil {
+				log.Infoln("close connect ", conf.Connection)
+				conf.db.Close()
+			}
+		}(v)
+	}
+}
+
 // Collect implements prometheus.Collector.
 func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
+	e.resetAllMetrics()
+
 	var err error
 
 	e.totalScrapes.Inc()
@@ -1041,18 +1105,15 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 		}
 	}(time.Now())
 
+	ch <- e.duration
+	ch <- e.totalScrapes
+	ch <- e.error
+
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second*time.Duration(*timeout))
 	e.gctx = ctx
 	defer cancel()
 
 	openedConn := e.Connect()
-	openedConn_closed := false
-	defer func() {
-		if !openedConn_closed {
-			close(openedConn)
-		}
-	}()
-
 	ii := cap(openedConn)
 	var wg sync.WaitGroup
 
@@ -1069,8 +1130,6 @@ ForLoop:
 		case <-ctx.Done():
 			// sql.connect timeout
 			// sql.DB .PingContext  may not work good. skip them
-			close(openedConn)
-			openedConn_closed = true
 			log.Warnf("connect timeout  %d of %d", ii-i, ii)
 			break ForLoop
 		}
@@ -1152,8 +1211,6 @@ ForLoop:
 			}
 			e.used_times.WithLabelValues(ipport, svname, "ScrapeLobbytes").Set(time.Since(t).Seconds())
 
-			conn1.db.Close()
-			conn1.db = nil
 		}(conn1)
 
 	}
@@ -1200,9 +1257,6 @@ ForLoop:
 		}
 	}
 
-	ch <- e.duration
-	ch <- e.totalScrapes
-	ch <- e.error
 	e.scrapeErrors.Collect(ch)
 	e.used_times.Collect(ch)
 }
@@ -1239,12 +1293,26 @@ func (e *Exporter) Handler(w http.ResponseWriter, r *http.Request) {
 func main() {
 	log.SetLevel(log.InfoLevel)
 	customFormatter := new(log.TextFormatter)
-	customFormatter.TimestampFormat = "2006-01-02 15:04:05"
+	customFormatter.TimestampFormat = time.RFC3339Nano
 	log.SetFormatter(customFormatter)
 	customFormatter.FullTimestamp = true
 
 	log.SetFormatter(log.StandardLogger().Formatter)
+
+	path, err := filepath.Abs(filepath.Dir(os.Args[0]))
+	if err != nil {
+		log.Fatalf("error: %v", err)
+	} else {
+		fh, err := os.OpenFile(path+"/"+*logFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		if err != nil {
+			log.Warnln(" logfile ", err)
+		} else {
+			log.SetOutput(fh)
+		}
+	}
+
 	flag.Parse()
+
 	log.Infoln("Starting Prometheus Oracle exporter " + Version)
 	if loadConfig() {
 		log.Infoln("Config loaded: ", *configFile)

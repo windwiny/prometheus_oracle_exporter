@@ -41,9 +41,10 @@ type Configs struct {
 }
 
 var (
-	cfgLok sync.Mutex
-	config Configs
-	pwd    string
+	cfgLok          sync.Mutex
+	config          Configs
+	pwd             string
+	backConnStepAll = make(chan int, 1)
 )
 
 // Oracle gives us some ugly names back. This function cleans things up for Prometheus.
@@ -73,13 +74,17 @@ func loadConfig() bool {
 		log.Fatalf("error: %v", err)
 		return false
 	} else {
-		cfgLok.Lock()
-		err := yaml.Unmarshal(content, &config)
-		cfgLok.Unlock()
+		var c Configs
+		err := yaml.Unmarshal(content, &c)
 		if err != nil {
 			log.Fatalf("error: %v", err)
 			return false
 		}
+		cfgLok.Lock()
+		oldconfig := config
+		go CloseConnection(oldconfig)
+		config = c
+		cfgLok.Unlock()
 		return true
 	}
 }
