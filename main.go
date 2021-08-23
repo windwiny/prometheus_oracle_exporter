@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	_ "net/http/pprof"
@@ -80,6 +81,7 @@ var (
 	logFile       = flag.String("logfile", "exporter.log", "Logfile for parsed Oracle Alerts.")
 	accessFile    = flag.String("accessfile", "access.conf", "Last access for parsed Oracle Alerts.")
 	timeout       = flag.Int("timeout", 5, "Collect Scrape All Metrics total time (db.Ping st.Query ...)")
+	testconn      = flag.Bool("testconn", false, "just test connect time")
 	landingPage   = []byte(`<html>
                           <head><title>Prometheus Oracle exporter</title></head>
                           <body>
@@ -145,7 +147,7 @@ func NewExporter() *Exporter {
 			Namespace: namespace,
 			Name:      "uptime",
 			Help:      "Gauge metric with uptime in days of the Instance.",
-		}, []string{"database", "dbinstance"}),
+		}, []string{"database", "dbinstance", "hostname"}),
 		tablespace: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: namespace,
 			Name:      "tablespace",
@@ -175,7 +177,7 @@ func NewExporter() *Exporter {
 			Namespace: namespace,
 			Name:      "up",
 			Help:      "Whether the Oracle server is up.",
-		}, []string{"database", "dbinstance"}),
+		}, []string{"database", "dbinstance", "hostname"}),
 		alertlog: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: namespace,
 			Name:      "error",
@@ -677,7 +679,7 @@ func (e *Exporter) ScrapeUptime(conn *Config) {
 			if err != nil {
 				return // ?
 			}
-			e.uptime.WithLabelValues(conn.Database, conn.Instance).Set(uptime)
+			e.uptime.WithLabelValues(conn.Database, conn.Instance, conn.hostname).Set(uptime)
 		}
 	}
 }
@@ -922,7 +924,7 @@ func (e *Exporter) Describe(ch chan<- *prometheus.Desc) {
 }
 
 func (e *Exporter) resetAllMetrics() {
-	e.used_times.Reset()
+	// e.used_times.Reset()
 	e.up.Reset()
 
 	e.session.Reset()
@@ -955,6 +957,7 @@ func (e *Exporter) resetAllMetrics() {
 // first time or connect breaked , will on next 2 time reconnect
 func (e *Exporter) Connect() chan *Config {
 	backConnStep1 := make(chan int)
+	go e.execConn(testConnStepAll)
 	go e.backConnect(backConnStep1, backConnStepAll)
 	<-backConnStep1
 
@@ -1026,25 +1029,26 @@ func (e *Exporter) backConnect(connStep1 chan<- int, connStepAll chan int) {
 					}
 					conf.db = db
 
-					var dbname, inname string
-					err = conf.db.QueryRow("select db_unique_name,instance_name from v$database,v$instance").Scan(&dbname, &inname)
+					var dbname, inname, hostname string
+					err = conf.db.QueryRow("select db_unique_name,instance_name,host_name from v$database,v$instance").Scan(&dbname, &inname, &hostname)
 					if err == nil {
 						if (len(conf.Database) == 0) || (len(conf.Instance) == 0) {
 							conf.Database = dbname
 							conf.Instance = inname
 						}
-						e.up.WithLabelValues(conf.Database, conf.Instance).Set(1)
+						conf.hostname = hostname
+						e.up.WithLabelValues(conf.Database, conf.Instance, conf.hostname).Set(1)
 					} else {
 						conf.db.Close()
 						conf.db = nil
-						e.up.WithLabelValues(conf.Database, conf.Instance).Set(0)
+						e.up.WithLabelValues(conf.Database, conf.Instance, conf.hostname).Set(0)
 						log.Errorln("Error connecting to database:", err)
 						//log.Infoln("Connect OK, Inital query failed: ", conf.Connection)
 					}
 				}
 			} else {
 				//log.Infoln("Dummy Connection: ", conf.Database)
-				e.up.WithLabelValues(conf.Database, conf.Instance).Set(0)
+				e.up.WithLabelValues(conf.Database, conf.Instance, conf.hostname).Set(0)
 			}
 		}(&config.Cfgs[i])
 	}
@@ -1119,7 +1123,6 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 
 ForLoop:
 	for i := 0; i < ii; i++ {
-		t0 := time.Now()
 		var conn1 *Config
 		select {
 		case con, ok := <-openedConn:
@@ -1133,7 +1136,6 @@ ForLoop:
 			log.Warnf("connect timeout  %d of %d", ii-i, ii)
 			break ForLoop
 		}
-		t1 := time.Now()
 
 		if conn1 == nil {
 			continue
@@ -1141,11 +1143,8 @@ ForLoop:
 
 		ipport, svname := splitConnStr(conn1.Connection)
 		if conn1.db == nil {
-			e.used_times.WithLabelValues(ipport, svname, "connectfailed").Set(float64(t1.Sub(t0).Milliseconds()))
 			continue
 		}
-
-		e.used_times.WithLabelValues(ipport, svname, "connect").Set(float64(t1.Sub(t0).Milliseconds()))
 
 		wg.Add(1)
 		go func(conn1 *Config) {
@@ -1307,7 +1306,7 @@ func main() {
 		if err != nil {
 			log.Warnln(" logfile ", err)
 		} else {
-			log.SetOutput(fh)
+			log.SetOutput(io.MultiWriter(fh, os.Stdout))
 		}
 	}
 
@@ -1315,6 +1314,12 @@ func main() {
 
 	log.Infoln("Starting Prometheus Oracle exporter " + Version)
 	if loadConfig() {
+		if *testconn {
+			log.Infoln(" run testConnects ", len(config.Cfgs))
+			testConnects()
+			return
+		}
+
 		log.Infoln("Config loaded: ", *configFile)
 		exporter := NewExporter()
 		prometheus.MustRegister(exporter)

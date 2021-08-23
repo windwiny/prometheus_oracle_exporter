@@ -34,6 +34,7 @@ type Config struct {
 	Alertlog   []Alert `yaml:"alertlog"`
 	Queries    []Query `yaml:"queries"`
 	db         *sql.DB
+	hostname   string
 }
 
 type Configs struct {
@@ -45,6 +46,7 @@ var (
 	config          Configs
 	pwd             string
 	backConnStepAll = make(chan int, 1)
+	testConnStepAll = make(chan int, 1)
 )
 
 // Oracle gives us some ugly names back. This function cleans things up for Prometheus.
