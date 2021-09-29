@@ -11,6 +11,7 @@ import (
 	"net/http"
 	_ "net/http/pprof"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -82,6 +83,7 @@ var (
 	accessFile    = flag.String("accessfile", "access.conf", "Last access for parsed Oracle Alerts.")
 	timeout       = flag.Int("timeout", 5, "Collect Scrape All Metrics total time (db.Ping st.Query ...)")
 	testconn      = flag.Bool("testconn", false, "just test connect time")
+	openfiles     = flag.Int("openfiles", 0, "open files")
 	landingPage   = []byte(`<html>
                           <head><title>Prometheus Oracle exporter</title></head>
                           <body>
@@ -1320,6 +1322,8 @@ func main() {
 			return
 		}
 
+		processOpenFiles()
+
 		log.Infoln("Config loaded: ", *configFile)
 		exporter := NewExporter()
 		prometheus.MustRegister(exporter)
@@ -1377,5 +1381,47 @@ func main() {
 
 		log.Infoln("Listening on", *listenAddress)
 		log.Fatal(http.ListenAndServe(*listenAddress, nil))
+	}
+}
+
+func processOpenFiles() {
+
+	log.Infof("openfiles ori: %d", *openfiles)
+	if *openfiles == 0 {
+		c, err := exec.Command("sh", "-c", "ulimit -n").Output()
+
+		if err != nil {
+			log.Error("sh -c \"ulimit -n\" failed", err)
+		} else {
+			var ii int
+			_, err := fmt.Sscanf(string(c), "%d", &ii)
+			if err != nil {
+				log.Error("Sscanf failed", err)
+			} else {
+				*openfiles = ii
+			}
+		}
+	}
+	log.Infof("openfiles new: %d", *openfiles)
+	if *openfiles != 0 {
+		ss := []string{"-n", "-p", fmt.Sprintf("%d", os.Getpid())}
+		go func() {
+			for {
+				c, err := exec.Command("lsof", ss...).Output()
+				if err != nil {
+					log.Error("run lsof query openfiles failed.", err)
+					return // break this
+				}
+				i := strings.Count(string(c), "\n")
+
+				if i >= *openfiles-10 {
+					log.Errorf("open too many files %d of %d. exit", i, *openfiles)
+					os.Exit(123)
+				}
+				log.Infof("open %d of %d files.", i, *openfiles)
+
+				time.Sleep(time.Second * 60)
+			}
+		}()
 	}
 }
